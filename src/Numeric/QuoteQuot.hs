@@ -11,27 +11,26 @@
 
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LexicalNegation #-}
 {-# LANGUAGE MagicHash #-}
-{-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE TemplateHaskellQuotes #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE UnboxedTuples #-}
-
-{-# OPTIONS_GHC -Wno-missing-signatures #-}
-{-# OPTIONS_GHC -Wno-partial-type-signatures #-}
 
 module Numeric.QuoteQuot
   (
+    MulHi(..)
   -- * Quasiquoters
-    quoteQuot
   , quoteRem
   , quoteQuotRem
+  , quoteMod
+  , quoteDivMod
   -- * AST
   , astQuot
   , AST(..)
   , interpretAST
   , quoteAST
   , assumeNonNegArg
-  , MulHi(..)
   ) where
 
 import Prelude
@@ -39,70 +38,84 @@ import Data.Bits
 import Data.Int
 import Data.Word
 import GHC.Exts
-
--- | Quote integer division ('quot') by a compile-time known divisor,
--- which generates source code, employing arithmetic and bitwise operations only.
--- This is usually __2.5x-3.5x faster__ than using normal 'quot'.
---
--- > {-# LANGUAGE TemplateHaskell #-}
--- > {-# OPTIONS_GHC -ddump-splices -ddump-simpl -dsuppress-all #-}
--- > module Example where
--- > import Numeric.QuoteQuot
--- >
--- > -- Equivalent to (`quot` 10).
--- > quot10 :: Word -> Word
--- > quot10 = $$(quoteQuot 10)
---
--- >>> quot10 123
--- 12
---
--- Here @-ddump-splices@ demonstrates the chosen implementation
--- for division by 10:
---
--- > Splicing expression quoteQuot 10 ======>
--- > ((`shiftR` 3) . ((\ (W# w_a9N4) ->
--- >   let !(# hi_a9N5, _ #) = (timesWord2# w_a9N4) 14757395258967641293##
--- >   in W# hi_a9N5) . id))
---
--- And @-ddump-simpl@ demonstrates generated Core:
---
--- > quot10 = \ x_a5t2 ->
--- >   case x_a5t2 of { W# w_acHY ->
--- >   case timesWord2# w_acHY 14757395258967641293## of
--- >   { (# hi_acIg, ds_dcIs #) ->
--- >   W# (uncheckedShiftRL# hi_acIg 3#)
--- >   }
--- >   }
---
--- Benchmarks show that this implementation is __3.5x faster__
--- than @(`@'quot'@` 10)@.
---
-quoteQuot ::
-  _ => a -> _ (a -> a)
-quoteQuot d = quoteAST (astQuot d)
+import Language.Haskell.TH.Syntax
 
 -- | Similar to 'quoteQuot', but for 'rem'.
-quoteRem ::
-  _ => a -> _ (a -> a)
+quoteRem :: (MulHi a, Quote m) => a -> Code m (a -> a)
 quoteRem d = [|| snd . $$(quoteQuotRem d) ||]
 
+-- | Similar to 'quoteRem', but for 'mod'.
+quoteMod :: (MulHi a, Quote m) => a -> Code m (a -> a)
+quoteMod d = [|| snd . $$(quoteDivMod d) ||]
+
 -- | Similar to 'quoteQuot', but for 'quotRem'.
-quoteQuotRem ::
-  _ => a -> _ (a -> (a, a))
+quoteQuotRem :: (MulHi a, Quote m) => a -> Code m (a -> (a, a))
 quoteQuotRem d = [|| \w -> let q = $$(quoteQuot d) w in (q, w - d * q) ||]
 
+-- | Similar to 'quoteDiv', but for 'divMod'.
+quoteDivMod :: (MulHi a, Quote m) => a -> Code m (a -> (a, a))
+quoteDivMod d = [|| \w -> let q = $$(quoteDiv d) w in (q, w - d * q) ||]
+
 -- | Types allowing to multiply wide and return the high word of result.
-class (Integral a, FiniteBits a) => MulHi a where
+class (Integral a, Lift a, FiniteBits a) => MulHi a where
   mulHi :: a -> a -> a
+
+  -- | Quote integer division ('quot') by a compile-time known divisor,
+  -- which generates source code, employing arithmetic and bitwise operations only.
+  -- This is usually __2.5x-3.5x faster__ than using normal 'quot'.
+  --
+  -- > {-# LANGUAGE TemplateHaskell #-}
+  -- > {-# OPTIONS_GHC -ddump-splices -ddump-simpl -dsuppress-all #-}
+  -- > module Example where
+  -- > import Numeric.QuoteQuot
+  -- >
+  -- > -- Equivalent to (`quot` 10).
+  -- > quot10 :: Word -> Word
+  -- > quot10 = $$(quoteQuot 10)
+  --
+  -- >>> quot10 123
+  -- 12
+  --
+  -- Here @-ddump-splices@ demonstrates the chosen implementation
+  -- for division by 10:
+  --
+  -- > Splicing expression quoteQuot 10 ======>
+  -- > ((`shiftR` 3) . ((\ (W# w_a9N4) ->
+  -- >   let !(# hi_a9N5, _ #) = (timesWord2# w_a9N4) 14757395258967641293##
+  -- >   in W# hi_a9N5) . id))
+  --
+  -- And @-ddump-simpl@ demonstrates generated Core:
+  --
+  -- > quot10 = \ x_a5t2 ->
+  -- >   case x_a5t2 of { W# w_acHY ->
+  -- >   case timesWord2# w_acHY 14757395258967641293## of
+  -- >   { (# hi_acIg, ds_dcIs #) ->
+  -- >   W# (uncheckedShiftRL# hi_acIg 3#)
+  -- >   }
+  -- >   }
+  --
+  -- Benchmarks show that this implementation is __3.5x faster__
+  -- than @(`@'quot'@` 10)@.
+  --
+  quoteQuot :: Quote m => a -> Code m (a -> a)
+
+  -- | Similar to 'quoteQuot', but for 'div'.
+  quoteDiv :: Quote m => a -> Code m (a -> a)
 
 instance MulHi Word8 where
   mulHi x y = fromIntegral ((fromIntegral x * fromIntegral y :: Word16) `shiftR` 8)
+  quoteQuot d = quoteAST (unsignedQuot d)
+  quoteDiv = quoteQuot
 
 instance MulHi Word16 where
   mulHi x y = fromIntegral ((fromIntegral x * fromIntegral y :: Word32) `shiftR` 16)
+  quoteQuot d = quoteAST (unsignedQuot d)
+  quoteDiv = quoteQuot
 
 instance MulHi Word32 where
   mulHi x y = fromIntegral ((fromIntegral x * fromIntegral y :: Word64) `shiftR` 32)
+  quoteQuot d = quoteAST (unsignedQuot d)
+  quoteDiv = quoteQuot
 
 -- | This instance is not efficient on 32-bit architecture.
 instance MulHi Word64 where
@@ -111,18 +124,34 @@ instance MulHi Word64 where
     = fromIntegral (fromIntegral x `mulHi` fromIntegral y :: Word)
     | otherwise
     = defaultMulHi x y
+  quoteQuot d = quoteAST (unsignedQuot d)
+  quoteDiv = quoteQuot
 
 instance MulHi Word where
   mulHi (W# x) (W# y) = let !(# hi, _ #) = timesWord2# x y in W# hi
+  quoteQuot d = quoteAST (unsignedQuot d)
+  quoteDiv = quoteQuot
 
 instance MulHi Int8 where
   mulHi x y = fromIntegral ((fromIntegral x * fromIntegral y :: Int16) `shiftR` 8)
+  quoteQuot d = quoteAST (signedQuot d)
+  quoteDiv d = [|| \i -> if i < 0 then -($$(go) -(i+1) + 1) else $$(go) i ||]
+    where
+      go = quoteAST (assumeNonNegArg (signedQuot d))
 
 instance MulHi Int16 where
   mulHi x y = fromIntegral ((fromIntegral x * fromIntegral y :: Int32) `shiftR` 16)
+  quoteQuot d = quoteAST (signedQuot d)
+  quoteDiv d = [|| \i -> if i < 0 then -($$(go) -(i+1) + 1) else $$(go) i ||]
+    where
+      go = quoteAST (assumeNonNegArg (signedQuot d))
 
 instance MulHi Int32 where
   mulHi x y = fromIntegral ((fromIntegral x * fromIntegral y :: Int64) `shiftR` 32)
+  quoteQuot d = quoteAST (signedQuot d)
+  quoteDiv d = [|| \i -> if i < 0 then -($$(go) -(i+1) + 1) else $$(go) i ||]
+    where
+      go = quoteAST (assumeNonNegArg (signedQuot d))
 
 -- | This instance is not efficient on 32-bit architecture.
 instance MulHi Int64 where
@@ -131,9 +160,18 @@ instance MulHi Int64 where
     = fromIntegral (fromIntegral x `mulHi` fromIntegral y :: Int)
     | otherwise
     = defaultMulHi x y
+  quoteQuot d = quoteAST (signedQuot d)
+  quoteDiv d = [|| \i -> if i < 0 then -($$(go) -(i+1) + 1) else $$(go) i ||]
+    where
+      go = quoteAST (assumeNonNegArg (signedQuot d))
 
 instance MulHi Int where
   mulHi (I# x) (I# y) = let !(# _, hi, _ #) = timesInt2# x y in I# hi
+  -- quoteQuot d = quoteAST (signedQuot d)
+  quoteQuot d = quoteAST (signedQuot d)
+  quoteDiv d = [|| \i -> if i < 0 then -($$(go) -(i+1) + 1) else $$(go) i ||]
+    where
+      go = quoteAST (assumeNonNegArg (signedQuot d))
 
 -- | An abstract syntax tree to represent
 -- a function of one argument.
@@ -194,8 +232,7 @@ defaultMulHi :: (Integral a, FiniteBits a) => a -> a -> a
 defaultMulHi x y = fromInteger $ (toInteger x * toInteger y) `shiftR` finiteBitSize x
 
 -- | Embed 'AST' into Haskell expression.
-quoteAST ::
-  _ => AST a -> _ (a -> a)
+quoteAST :: (MulHi a, Quote m) => AST a -> Code m (a -> a)
 quoteAST = \case
   Arg            -> [|| id ||]
   Shr x k        -> [|| (`shiftR` k) . $$(quoteAST x) ||]
